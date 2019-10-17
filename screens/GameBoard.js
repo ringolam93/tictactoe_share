@@ -8,7 +8,10 @@ import { CENTER_POINTS, AREAS, CONDITIONS, GAME_RESULT_NO, GAME_RESULT_CIRCLE, G
 import styles from './styles/custGameBoard'
 import PromptArea from './PromptArea'
 
-YellowBox.ignoreWarnings(['Remote debugger']);
+console.ignoredYellowBox = ['Remote debugger'];
+YellowBox.ignoreWarnings([
+    'Unrecognized WebSocket connection option(s) `agent`, `perMessageDeflate`, `pfx`, `key`, `passphrase`, `cert`, `ca`, `ciphers`, `rejectUnauthorized`. Did you mean to put these under `headers`?'
+]);
 
 export default class GameBoard extends Component {
     static navigationOptions = {
@@ -19,22 +22,28 @@ export default class GameBoard extends Component {
         super(props)
         const { navigation } = this.props;
         this.state= {
+          open: false, connected: false,
           result: GAME_RESULT_NO,
-          round: 0,
-          seconds: 0,
-          onlinePpt: 0,
+          round: 0, seconds: 0, numClients: 0,
           userID:JSON.stringify(navigation.getParam('userid', '')),
-          circleInputs:[],
-          crossInputs:[],
-          isYourTurn: false,
-          checkWinner: false,
-          chatMessage: "",
-          chatMessages: []
+          circleInputs:[], crossInputs:[],
+          userType: '', isYourTurn: false, gameMsg:'', isGameStart:false,
+          checkWinner: false
         }
+        this.socket = io("http://ringohome.asuscomm.com:9868");
+        this.socket.onopen = () => {
+            this.setState({connected:true})
+        };
+        this.emit = this.emit.bind(this);
+    }
+    emit() {
+      if( this.state.connected ) {
+        this.socket.send("It worked!")
+        this.setState(prevState => ({ open: !prevState.open }))
+      }
     }
     tick() { this.setState(prevState => ({ seconds: prevState.seconds + 1 })); }
     _handleAppStateChange = (nextAppState) => {
-                 //this.setState({userid: this.props.navigation.getParam('userid', '')});
                  if ( nextAppState === 'background' ) {
                      fetch('http://ringohome.asuscomm.com:6158/tictactoe_db/reg.php', {
                          method: 'POST',
@@ -65,179 +74,176 @@ export default class GameBoard extends Component {
                   this.setState({appState: nextAppState});
                  };
     componentDidMount() {
-       this.socket = io("http://ringohome.asuscomm.com:9868",{
-           agent:'-',
-           perMessageDeflate:'-',
-           pfx:'-',
-           cert:'-',
-           ca:'-',
-           ciphers:'-',
-           rejectUnauthorized:'-'
+
+       this.socket.on("updateGameBoardCross", cross => {
+           this.setState({ crossInputs: [...this.state.crossInputs, cross] });
+           if (this.state.userType+'' != 'viewer'){
+                this.setState({ isYourTurn:true, gameMsg: 'Your Turn!' });
+           }
+
+           setTimeout(() => { this.judgeWinner() }, 5)
        });
-       this.socket.on("chat message", msg => {
-         this.setState({ chatMessages: [...this.state.chatMessages, msg] });
+       this.socket.on("updateGameBoardCircle", circle => {
+
+           this.setState({ circleInputs: [...this.state.circleInputs, circle] });
+           if (this.state.userType+'' != 'viewer'){
+                this.setState({ isYourTurn:true, gameMsg: 'Your Turn!' });
+           }
+           setTimeout(() => { this.judgeWinner() }, 5)
        });
 
-       this.socket.on("updateGameBoardCross", circle => {
-        this.setState({ circleInputs: [...this.state.circleInputs, circle] });
+       this.socket.on("numClients", num => {
+            this.setState({ numClients:num });
        });
-       this.socket.on("updateGameBoardCircle", cross => {
-        this.setState({ crossInputs: [...this.state.crossInputs, cross] });
+
+       this.socket.on("newUserLogin", data => {
+            if (data.userType+'' != ''){ this.setState({ userType: data.userType }); }
+            this.setState({ gameMsg: data.gameMsg });
+       });
+
+       this.socket.on("newGame", (gameIsStart) => {
+            if (this.state.userType+'' == 'holder'){
+                this.setState({ isGameStart: true, isYourTurn:true });
+                this.setGameMsg();
+
+            }else if (this.state.userType+'' == 'guest'){
+                this.setState({ isGameStart: true, isYourTurn:false });
+                this.setGameMsg();
+
+            }else if (this.state.userType+'' == 'viewer'){
+                this.setState({ isGameStart: true, isYourTurn:false, gameMsg: 'Viewer Mode' });
+
+            }
+       });
+
+       this.socket.on("reStartGame", (gameIsStart) => {
+             const { round } = this.state
+             this.setState({
+                 circleInputs: [],
+                 crossInputs: [],
+                 result: GAME_RESULT_NO,
+                 round: round + 1,
+                 isYourTurn:true
+             })
+            if (this.state.userType+'' == 'holder'){
+                this.setState({ isGameStart: true, isYourTurn:true });
+                this.setGameMsg();
+
+            }else if (this.state.userType+'' == 'guest'){
+                this.setState({ isGameStart: true, isYourTurn:false });
+                this.setGameMsg();
+
+            }else if (this.state.userType+'' == 'viewer'){
+                this.setState({ isGameStart: true, isYourTurn:false, gameMsg: 'Viewer Mode' });
+
+            }
        });
      }
     componentWillUnmount() {
          AppState.removeEventListener('change', this._handleAppStateChange);
          clearInterval(this.interval);
      }
-    componentDidUpdate() {
-       this.getNumOfOnlinePerson();
-    }
-
-    gameEnd(){
-        fetch('http://ringohome.asuscomm.com:6158/tictactoe_db/process.php', {
-                method: 'POST',
-                headers: { 'Accept': 'application/json', 'Content-Type': 'application/json', },
-                body: JSON.stringify({
-                    part: 'end',
-                    roomID: '1'
-                })
-            })
-            .then((response) => response.json() )
-            .then((responseData) => {
-                if (responseData.flag+''=='fail') { console.log(responseData); }
-            })
-            .catch((error) => { console.warn(error); })
-            .done();
-        }
-
-    getNumOfOnlinePerson(){
-                fetch('http://ringohome.asuscomm.com:6158/tictactoe_db/process.php', {
-                    method: 'POST',
-                    headers: {
-                        'Accept': 'application/json',
-                        'Content-Type': 'application/json',
-                    },
-                    body: JSON.stringify({
-                        part: 'countOnline'
-                    })
-                })
-                .then((response) => response.json() )
-                .then((responseData) => {
-                    if (responseData.flag+''=='success') {
-                        this.setState({onlinePpt: responseData.res});
-                    }else if (responseData.flag+''=='fail'){
-                        console.log(responseData);
-                    }
-                })
-                .catch((error) => {
-                    console.warn(error);
-                })
-                .done();
-              }
-
+    componentDidUpdate() {}
     restart() {
         const { round } = this.state
         this.setState({
             circleInputs: [],
             crossInputs: [],
             result: GAME_RESULT_NO,
-            round: round + 1
+            round: round + 1,
+            isYourTurn:true
         })
+        this.socket.emit("reStartGame", '');
      }
-
-    boardClickHandler(e: Object) {
-        const { locationX, locationY } = e.nativeEvent
-        const { circleInputs, crossInputs, result, isYourTurn } = this.state
-        const { navigation } = this.props;
-
-        if (result !== -1) { return }
-
-        const inputs = circleInputs.concat(crossInputs)
-        const area = AREAS.find(d => (locationX >= d.startX && locationX <= d.endX) && (locationY >= d.startY && locationY <= d.endY))
-
-        if (area && inputs.every(d => d !== area.id)) {
-             if (inputs.length % 2 === 0){
-              // Cross
-              this.setState({ crossInputs: this.state.crossInputs.concat(area.id) });
-              //this.socket.emit("updateGameBoardCross", this.state.crossInputs.concat(area.id));
-              this.socket.emit("updateGameBoardCross", {areaID:area.id, userID:JSON.stringify(navigation.getParam('userid', ''))});
-
-            }else{
-              // Circle
-              this.setState({ circleInputs: this.state.circleInputs.concat(area.id) });
-              //this.socket.emit("updateGameBoardCircle", this.state.circleInputs.concat(area.id));
-              this.socket.emit("updateGameBoardCircle", {areaID:area.id, userID:JSON.stringify(navigation.getParam('userid', ''))});
-            }
-        }
-    }
-
     isWinner(inputs: number[]) {
-       return CONDITIONS.some(d => d.every(item => inputs.indexOf(item) !== -1))
+        console.log("isWinner()");
+        return CONDITIONS.some(d => d.every(item => inputs.indexOf(item) !== -1))
     }
-
     judgeWinner() {
       const { circleInputs, crossInputs, result } = this.state
       const inputs = circleInputs.concat(crossInputs);
       if (inputs.length >= 5 ) {
         let res = this.isWinner(circleInputs)
         if (res && result !== GAME_RESULT_CIRCLE) {
-          return this.setState({ result: GAME_RESULT_CIRCLE })
+          return this.setState({ result: GAME_RESULT_CIRCLE, gameMsg:'' })
         }
         res = this.isWinner(crossInputs)
         if (res && result !== GAME_RESULT_CROSS) {
-          return this.setState({ result: GAME_RESULT_CROSS })
+          return this.setState({ result: GAME_RESULT_CROSS, gameMsg:'' })
         }
       }
       if (inputs.length === 9 && result === GAME_RESULT_NO && result !== GAME_RESULT_TIE) {
-        //this.setState({ result: GAME_RESULT_TIE })
-        console.log("Tie");
+        this.setState({ result: GAME_RESULT_TIE, gameMsg:'' })
       }
     }
-
-    submitChatMessage() {
-        this.socket.emit("chat message", this.state.chatMessage);
-        this.setState({ chatMessage: "" });
+    setGameMsg(){
+        if (this.state.isYourTurn){
+            this.setState({ gameMsg: 'Your Turn!' })
+        }else{
+            this.setState({ gameMsg: 'Opponent Turn!' })
+        }
     }
+    boardClickHandler(e: Object) {
+        const { locationX, locationY } = e.nativeEvent
+        const { circleInputs, crossInputs, result, isYourTurn, isGameStart } = this.state
+        const { navigation } = this.props;
 
-  render() {
-    const { result } = this.state
-//     const circleInputs = this.state.circleInputs.map(circleInput => (
-//        <Circle key={circleInput}>{circleInput}</Circle>
-//     ));
-//     const crossInputs = this.state.crossInputs.map(crossInput => (
-//        <Cross key={crossInput}>{crossInput}</Cross>
-//     ));
-    return (
-      <View style={styles.container}>
-                 <View style={styles.onlinePpt}>
-                  <Text>Welcome {this.state.userID}.
-                  Online people: {this.state.onlinePpt}.
-                  Second(s): {this.state.seconds}</Text>
-                 </View>
-                 <View style={styles.gameBoard_container}>
-                  <TouchableWithoutFeedback onPress={e => this.boardClickHandler(e)} >
-                    <View style={styles.board}>
-                      <View style={styles.line} />
-                      <View style={[styles.line, { width: 3, height: 306, transform: [{translateX: 200}]}]} />
-                      <View style={[styles.line, { width: 306, height: 3, transform: [{translateY: 100}]}]} />
-                      <View style={[styles.line, { width: 306, height: 3, transform: [{translateY: 200}]}]} />
-                      {
-                          this.state.circleInputs.map((d, i) => (
-                              <Circle key={i} xTranslate={CENTER_POINTS[d].x} yTranslate={CENTER_POINTS[d].y} color='deepskyblue' />
-                          ))
-                      }
-                      {
-                          this.state.crossInputs.map((d, i) => (
-                              <Cross key={i} xTranslate={CENTER_POINTS[d].x} yTranslate={CENTER_POINTS[d].y} color='red' />
-                          ))
-                      }
-                    </View>
-                  </TouchableWithoutFeedback>
-                 </View>
-              <PromptArea result={result} onRestart={() => this.restart()} />
-            </View>
+        if (result !== -1 || !isYourTurn || !isGameStart) { return }
 
+        const inputs = circleInputs.concat(crossInputs)
+        const area = AREAS.find(d => (locationX >= d.startX && locationX <= d.endX) && (locationY >= d.startY && locationY <= d.endY))
 
-    )
-  }
+        if (area && inputs.every(d => d !== area.id)) {
+             if (inputs.length % 2 === 0){
+              // Circle
+              this.setState({ circleInputs: this.state.circleInputs.concat(area.id), isYourTurn:false, gameMsg: 'Opponent Turn!' });
+              this.socket.emit("updateGameBoardCircle", {areaID:area.id, userID:this.state.userID});
+            }else{
+              // Cross
+              this.setState({ crossInputs: this.state.crossInputs.concat(area.id), isYourTurn:false, gameMsg: 'Opponent Turn!' });
+              this.socket.emit("updateGameBoardCross", {areaID:area.id, userID:this.state.userID});
+            }
+        }
+        setTimeout(() => { this.judgeWinner() }, 5)
+    }
+    render() {
+        return (
+          <View style={styles.container}>
+             <View style={styles.onlinePpt}>
+              <Text>
+                  Welcome {this.state.userID}.
+                  Second(s): {this.state.seconds}.
+                  Online user(s): {this.state.numClients}.
+                  Your Type: {this.state.userType}.
+              </Text>
+              <Text>
+                    Round {this.state.round}
+              </Text>
+             </View>
+             <View style={styles.gameBoard_container}>
+              <TouchableWithoutFeedback onPress={e => this.boardClickHandler(e)} >
+                <View style={styles.board}>
+                  <View style={styles.line} />
+                  <View style={[styles.line, { width: 3, height: 306, transform: [{translateX: 200}]}]} />
+                  <View style={[styles.line, { width: 306, height: 3, transform: [{translateY: 100}]}]} />
+                  <View style={[styles.line, { width: 306, height: 3, transform: [{translateY: 200}]}]} />
+                  {
+                      this.state.circleInputs.map((d, i) => (
+                          <Circle key={i} xTranslate={CENTER_POINTS[d].x} yTranslate={CENTER_POINTS[d].y} color='deepskyblue' />
+                      ))
+                  }
+                  {
+                      this.state.crossInputs.map((d, i) => (
+                          <Cross key={i} xTranslate={CENTER_POINTS[d].x} yTranslate={CENTER_POINTS[d].y} color='red' />
+                      ))
+                  }
+                </View>
+              </TouchableWithoutFeedback>
+             </View>
+             <Text style={styles.text}> { this.state.gameMsg } </Text>
+
+          <PromptArea result={this.state.result} userType={this.state.userType} onRestart={() => this.restart()} />
+         </View>
+        )
+    }
 }
